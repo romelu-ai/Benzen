@@ -16,9 +16,9 @@ html,body{height:100%;background:#1a1f2e;font-family:'Noto Sans JP',sans-serif;o
 .hint{font-size:10px;color:#4a5568;}
 .vp{position:fixed;top:46px;left:0;right:0;bottom:0;overflow:hidden;cursor:grab;background:#2a2f3e;touch-action:none;}
 .vp.grabbing{cursor:grabbing;}
-.map-root{position:absolute;top:0;left:0;transform-origin:0 0;will-change:transform;}
+.map-root{position:absolute;top:0;left:0;transform-origin:0 0;will-change:transform;-webkit-backface-visibility:hidden;backface-visibility:hidden;}
 .wrap{position:relative;display:inline-block;line-height:0;font-size:0;}
-.wrap img{display:block;width:2800px;height:auto;user-select:none;-webkit-user-drag:none;pointer-events:none;}
+.wrap img{display:block;width:2800px;height:auto;user-select:none;-webkit-user-drag:none;pointer-events:none;-webkit-user-select:none;}
 .wrap svg{position:absolute;top:0;left:0;width:100%;height:100%;display:block;overflow:visible;}
 .hs{cursor:pointer;transition:fill .12s,stroke .12s;}
 .hs:hover{fill:rgba(79,156,249,0.18);stroke:rgba(79,156,249,0.75);stroke-width:2.5;}
@@ -255,8 +255,30 @@ let selId=null,quizMode=false,quizRevealed=new Set();
 function initHS(){
   document.querySelectorAll('.hs').forEach(el=>{
     const id=parseInt(el.dataset.id);
+    let hsTouchStartX=0,hsTouchStartY=0,hsTouchStartT=0;
+
+    // Mouse click (desktop)
     el.addEventListener('click',e=>{e.stopPropagation();doSel(id);});
-    el.addEventListener('touchend',e=>{e.stopPropagation();e.preventDefault();doSel(id);},{passive:false});
+
+    // Touch: record start position
+    el.addEventListener('touchstart',e=>{
+      hsTouchStartX=e.touches[0].clientX;
+      hsTouchStartY=e.touches[0].clientY;
+      hsTouchStartT=Date.now();
+    },{passive:true});
+
+    // Touch: only fire if it was a genuine tap (not a scroll/pan)
+    el.addEventListener('touchend',e=>{
+      e.stopPropagation();
+      const dx=Math.abs(e.changedTouches[0].clientX-hsTouchStartX);
+      const dy=Math.abs(e.changedTouches[0].clientY-hsTouchStartY);
+      const dt=Date.now()-hsTouchStartT;
+      // Only count as tap if: moved <10px AND lifted within 300ms
+      if(dx<10 && dy<10 && dt<300){
+        e.preventDefault();
+        doSel(id);
+      }
+    },{passive:false});
   });
 }
 function doSel(id){
@@ -347,22 +369,142 @@ function resetView(){
   document.querySelectorAll('.hs').forEach(el=>el.classList.remove('active','related','dimmed'));
   document.getElementById('quizLayer').innerHTML='';closePanel();
 }
-let px=0,py=0,sc=1,drag=false,sPX,sPY,sMX,sMY,pinchD=null,pinchSt=null,lastTap=0;
+let px=0,py=0,sc=1;
+let drag=false,sPX,sPY,sMX,sMY;
+let pinchD=null,pinchSt=null;
+let lastTap=0;
+// RAF-based smooth rendering
+let rafId=null,targetPx=0,targetPy=0,targetSc=1;
 const IW=2800,IH=2100;
-function applyT(){document.getElementById('root').style.transform=`translate(${px}px,${py}px) scale(${sc})`;}
-function clamp(){const vp=document.getElementById('vp'),pad=60,vw=vp.clientWidth,vh=vp.clientHeight;px=Math.min(pad,Math.max(vw-IW*sc-pad,px));py=Math.min(pad,Math.max(vh-IH*sc-pad,py));}
-function fitView(){const vp=document.getElementById('vp');sc=Math.min(vp.clientWidth/IW,vp.clientHeight/IH)*0.97;px=(vp.clientWidth-IW*sc)/2;py=(vp.clientHeight-IH*sc)/2;applyT();}
+const root=()=>document.getElementById('root');
+
+function applyT(){
+  root().style.transform=`translate(${px}px,${py}px) scale(${sc})`;
+}
+function scheduleRender(){
+  // Use RAF for smooth pan - interpolate toward target
+  if(rafId) return;
+  rafId=requestAnimationFrame(()=>{
+    rafId=null;
+    // Direct set (no lerp needed for touch - already smooth from touchmove rate)
+    px=targetPx; py=targetPy; sc=targetSc;
+    applyT();
+  });
+}
+function clamp(){
+  const vp=document.getElementById('vp'),pad=60,vw=vp.clientWidth,vh=vp.clientHeight;
+  targetPx=Math.min(pad,Math.max(vw-IW*targetSc-pad,targetPx));
+  targetPy=Math.min(pad,Math.max(vh-IH*targetSc-pad,targetPy));
+}
+function fitView(){
+  const vp=document.getElementById('vp');
+  targetSc=Math.min(vp.clientWidth/IW,vp.clientHeight/IH)*0.97;
+  targetPx=(vp.clientWidth-IW*targetSc)/2;
+  targetPy=(vp.clientHeight-IH*targetSc)/2;
+  px=targetPx; py=targetPy; sc=targetSc;
+  applyT();
+}
+
 window.addEventListener('DOMContentLoaded',()=>{initHS();fitView();});
 window.addEventListener('resize',fitView);
+
 (()=>{
   const vp=document.getElementById('vp');
-  vp.addEventListener('mousedown',e=>{if(e.target.closest('.hs'))return;drag=true;sPX=px;sPY=py;sMX=e.clientX;sMY=e.clientY;vp.classList.add('grabbing');});
-  window.addEventListener('mousemove',e=>{if(!drag)return;px=sPX+(e.clientX-sMX);py=sPY+(e.clientY-sMY);clamp();applyT();});
+
+  // ── MOUSE ──
+  vp.addEventListener('mousedown',e=>{
+    if(e.target.closest('.hs'))return;
+    drag=true;
+    sPX=targetPx;sPY=targetPy;sMX=e.clientX;sMY=e.clientY;
+    vp.classList.add('grabbing');
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!drag)return;
+    targetPx=sPX+(e.clientX-sMX);
+    targetPy=sPY+(e.clientY-sMY);
+    clamp(); scheduleRender();
+  });
   window.addEventListener('mouseup',()=>{drag=false;vp.classList.remove('grabbing');});
-  vp.addEventListener('wheel',e=>{e.preventDefault();const r=vp.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;const ns=Math.min(3,Math.max(0.15,sc*(e.deltaY<0?1.12:0.9)));px=mx-(mx-px)*(ns/sc);py=my-(my-py)*(ns/sc);sc=ns;clamp();applyT();},{passive:false});
-  vp.addEventListener('touchstart',e=>{if(e.touches.length===1){if(e.touches[0].target.closest('.hs'))return;drag=true;sPX=px;sPY=py;sMX=e.touches[0].clientX;sMY=e.touches[0].clientY;}else if(e.touches.length===2){drag=false;const dx=e.touches[0].clientX-e.touches[1].clientX,dy=e.touches[0].clientY-e.touches[1].clientY;pinchD=Math.sqrt(dx*dx+dy*dy);pinchSt={sc,px,py,mx:(e.touches[0].clientX+e.touches[1].clientX)/2,my:(e.touches[0].clientY+e.touches[1].clientY)/2};}},{passive:true});
-  vp.addEventListener('touchmove',e=>{e.preventDefault();if(e.touches.length===1&&drag){px=sPX+(e.touches[0].clientX-sMX);py=sPY+(e.touches[0].clientY-sMY);clamp();applyT();}else if(e.touches.length===2&&pinchD&&pinchSt){const dx=e.touches[0].clientX-e.touches[1].clientX,dy=e.touches[0].clientY-e.touches[1].clientY;const nd=Math.sqrt(dx*dx+dy*dy),ns=Math.min(3,Math.max(0.15,pinchSt.sc*(nd/pinchD)));const r=vp.getBoundingClientRect(),mx=pinchSt.mx-r.left,my=pinchSt.my-r.top;px=mx-(mx-pinchSt.px)*(ns/pinchSt.sc);py=my-(my-pinchSt.py)*(ns/pinchSt.sc);sc=ns;clamp();applyT();}},{passive:false});
-  vp.addEventListener('touchend',e=>{if(e.touches.length<2){pinchD=null;pinchSt=null;}if(e.touches.length===0){drag=false;const now=Date.now();if(!e.changedTouches[0].target.closest('.hs')&&now-lastTap<300)fitView();lastTap=now;}});
+
+  // ── WHEEL ZOOM ──
+  vp.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const r=vp.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+    const factor=e.deltaY<0?1.10:0.91;
+    const ns=Math.min(3,Math.max(0.15,targetSc*factor));
+    targetPx=mx-(mx-targetPx)*(ns/targetSc);
+    targetPy=my-(my-targetPy)*(ns/targetSc);
+    targetSc=ns; clamp(); scheduleRender();
+  },{passive:false});
+
+  // ── TOUCH ──
+  // Track touch start info for tap vs drag discrimination
+  let touchStartX=0,touchStartY=0,touchStartTime=0,touchMoved=false;
+  const TAP_MOVE_THRESHOLD=10; // px - must move less than this to count as tap
+  const TAP_TIME_THRESHOLD=250; // ms - must lift within this to count as tap
+
+  vp.addEventListener('touchstart',e=>{
+    if(e.touches.length===1){
+      const t=e.touches[0];
+      touchStartX=t.clientX; touchStartY=t.clientY;
+      touchStartTime=Date.now(); touchMoved=false;
+      // Don't start drag yet - wait to see if it moves
+      sPX=targetPx; sPY=targetPy; sMX=t.clientX; sMY=t.clientY;
+    } else if(e.touches.length===2){
+      drag=false; touchMoved=true; // cancel any pending tap
+      const dx=e.touches[0].clientX-e.touches[1].clientX;
+      const dy=e.touches[0].clientY-e.touches[1].clientY;
+      pinchD=Math.sqrt(dx*dx+dy*dy);
+      pinchSt={sc:targetSc,px:targetPx,py:targetPy,
+        mx:(e.touches[0].clientX+e.touches[1].clientX)/2,
+        my:(e.touches[0].clientY+e.touches[1].clientY)/2};
+    }
+  },{passive:true});
+
+  vp.addEventListener('touchmove',e=>{
+    e.preventDefault();
+    if(e.touches.length===1){
+      const t=e.touches[0];
+      const dx=t.clientX-touchStartX, dy=t.clientY-touchStartY;
+      // Mark as moved if beyond threshold
+      if(!touchMoved && (Math.abs(dx)>TAP_MOVE_THRESHOLD||Math.abs(dy)>TAP_MOVE_THRESHOLD)){
+        touchMoved=true;
+        // Only start drag if not on a hotspot
+        if(!e.target.closest('.hs')) drag=true;
+      }
+      if(drag){
+        targetPx=sPX+(t.clientX-sMX);
+        targetPy=sPY+(t.clientY-sMY);
+        clamp(); scheduleRender();
+      }
+    } else if(e.touches.length===2&&pinchD&&pinchSt){
+      const dx=e.touches[0].clientX-e.touches[1].clientX;
+      const dy=e.touches[0].clientY-e.touches[1].clientY;
+      const nd=Math.sqrt(dx*dx+dy*dy);
+      const ns=Math.min(3,Math.max(0.15,pinchSt.sc*(nd/pinchD)));
+      const r=vp.getBoundingClientRect();
+      const mx=pinchSt.mx-r.left,my=pinchSt.my-r.top;
+      targetPx=mx-(mx-pinchSt.px)*(ns/pinchSt.sc);
+      targetPy=my-(my-pinchSt.py)*(ns/pinchSt.sc);
+      targetSc=ns; clamp(); scheduleRender();
+    }
+  },{passive:false});
+
+  vp.addEventListener('touchend',e=>{
+    if(e.touches.length<2){pinchD=null;pinchSt=null;}
+    if(e.touches.length===0){
+      drag=false;
+      const elapsed=Date.now()-touchStartTime;
+      const ct=e.changedTouches[0];
+      // Double-tap to fit view (only when not on hotspot and not moved)
+      if(!touchMoved && elapsed<TAP_TIME_THRESHOLD){
+        const now=Date.now();
+        if(!ct.target.closest('.hs') && now-lastTap<350) fitView();
+        lastTap=now;
+      }
+      touchMoved=false;
+    }
+  },{passive:true});
 })();
 </script>
 </body>
